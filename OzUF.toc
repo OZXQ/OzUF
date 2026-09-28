@@ -1,0 +1,13 @@
+## Interface: 11200
+## Title: OzUF
+## Notes: Lightweight Unit Frames with 2x Health Bar, Focus Frame, Movable Units, and Clean 2-Line Text.
+## Author: Oz
+## Version: 1.0.0
+## SavedVariables: OzUF_DB
+
+OzUF.lua
+player.lua
+target.lua
+focus.lua
+party.lua
+configui.lua
