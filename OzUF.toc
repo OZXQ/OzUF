@@ -1,13 +1,14 @@
 ## Interface: 11200
 ## Title: OzUF
-## Notes: Lightweight Unit Frames with 2x Health Bar, Focus Frame, Movable Units, and Clean 2-Line Text.
+## Notes: Enhanced Unit Frames: Big Health Bars, Class Portraits, Class Colors, Health Numbers, Energy Tick, and More Buffs.
 ## Author: Oz
-## Version: 1.0.0
-## SavedVariables: OzUF_DB
+## Version: 2.0.0
+## SavedVariables: OzUF_DB, OzUF_Config
 
 OzUF.lua
-player.lua
-target.lua
-focus.lua
-party.lua
-configui.lua
+playerframe.lua
+targetframe.lua
+focusframe.lua
+partyframe.lua
+castbar.lua
+config.lua
