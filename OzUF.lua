@@ -41,6 +41,50 @@ OzUF.CLASS_ICON = {
 }
 
 -------------------------------------------------------------------------------
+-- Aura Button Reference Cache
+-- Aura buttons are created once at load and afterwards only re-textured /
+-- re-anchored (client FrameXML TargetDebuffButton_Update & RefreshBuffs never
+-- CreateFrame), so object identity is stable and safe to cache. This removes
+-- the ~600-900 string concatenations + getglobal performed on every refresh.
+-------------------------------------------------------------------------------
+OzUF.AuraButtons = OzUF.AuraButtons or {}
+local auraState = {}
+
+local function GetAuraGroup(prefix, maxCount, isDebuff)
+    local arr = OzUF.AuraButtons[prefix]
+    if not arr then
+        arr = {}
+        OzUF.AuraButtons[prefix] = arr
+    end
+    for i = 1, maxCount do
+        if not arr[i] then
+            arr[i] = {
+                button = _G[prefix .. i],
+                icon   = _G[prefix .. i .. "Icon"],
+                count  = isDebuff and _G[prefix .. i .. "Count"],
+                border = isDebuff and _G[prefix .. i .. "Border"],
+            }
+        end
+    end
+    return arr
+end
+OzUF.GetAuraGroup = GetAuraGroup
+
+-- Drop cached references. Call after PLAYER_ENTERING_WORLD so we capture the
+-- final objects instead of ones a later-loaded addon may have replaced.
+function OzUF.ResetAuraCache(framePrefix)
+    if not OzUF.AuraButtons then return end
+    if framePrefix then
+        OzUF.AuraButtons[framePrefix .. "Buff"] = nil
+        OzUF.AuraButtons[framePrefix .. "Debuff"] = nil
+        auraState[framePrefix] = nil
+    else
+        OzUF.AuraButtons = {}
+        for k in pairs(auraState) do auraState[k] = nil end
+    end
+end
+
+-------------------------------------------------------------------------------
 -- Aura Arrangement & Update (Shared by TargetFrame & FocusFrame)
 -------------------------------------------------------------------------------
 function OzUF.ArrangeButtonGroup(prefix, count, startAnchor, isFirstGroup, firstRowCount, secondRowCount, thirdRowCount,
@@ -51,8 +95,11 @@ function OzUF.ArrangeButtonGroup(prefix, count, startAnchor, isFirstGroup, first
     local currentRowCount = 1
     local rowStartIndex = 1
 
+    local arr = OzUF.AuraButtons[prefix]
+
     for i = 1, count do
-        local button = _G[prefix .. i]
+        local entry = arr and arr[i]
+        local button = entry and entry.button or _G[prefix .. i]
         if button then
             button:ClearAllPoints()
             button:Show()
@@ -86,14 +133,16 @@ function OzUF.ArrangeButtonGroup(prefix, count, startAnchor, isFirstGroup, first
                     else
                         currentRowCount = 1
                         rowStartIndex = i
-                        local anchorButton = _G[prefix .. (i - buttonsPerRow)]
+                        local anchorEntry = arr and arr[i - buttonsPerRow]
+                        local anchorButton = anchorEntry and anchorEntry.button or _G[prefix .. (i - buttonsPerRow)]
                         if anchorButton then
                             button:SetPoint("BOTTOMLEFT", anchorButton, "TOPLEFT", 0, 2)
                         end
                     end
                 else
                     if rows <= maxRows then
-                        local prevButton = _G[prefix .. (i - 1)]
+                        local prevEntry = arr and arr[i - 1]
+                        local prevButton = prevEntry and prevEntry.button or _G[prefix .. (i - 1)]
                         if prevButton then
                             button:SetPoint("LEFT", prevButton, "RIGHT", 3, 0)
                         end
@@ -107,97 +156,123 @@ function OzUF.ArrangeButtonGroup(prefix, count, startAnchor, isFirstGroup, first
     end
 
     if count > 0 then
-        local lastRowStartIndex = rowStartIndex
-        return _G[prefix .. lastRowStartIndex], rows
+        local lastEntry = arr and arr[rowStartIndex]
+        return lastEntry and lastEntry.button or _G[prefix .. rowStartIndex], rows
     end
     return nil, 0
 end
 
 function OzUF.UpdateAuras(unit, framePrefix, maxBuffs, maxDebuffs)
-    maxBuffs = maxBuffs or 64
-    maxDebuffs = maxDebuffs or 128
+    maxBuffs = maxBuffs or 32
+    maxDebuffs = maxDebuffs or 32
+
+    local buffKey = framePrefix .. "Buff"
+    local debuffKey = framePrefix .. "Debuff"
+    local buffArr = GetAuraGroup(buffKey, maxBuffs, false)
+    local debArr = GetAuraGroup(debuffKey, maxDebuffs, true)
+
+    local st = auraState[framePrefix]
+    if not st then
+        st = { nb = -1, nd = -1, friend = nil }
+        auraState[framePrefix] = st
+    end
+
+    -- Unit gone: hide what is currently shown, then bail out
+    if not unit or not UnitExists(unit) then
+        if st.nb == 0 and st.nd == 0 then return end
+        for i = 1, ((st.nb < 0) and maxBuffs or st.nb) do
+            local b = buffArr[i].button
+            if b then
+                b:ClearAllPoints()
+                b:Hide()
+            end
+        end
+        for i = 1, ((st.nd < 0) and maxDebuffs or st.nd) do
+            local b = debArr[i].button
+            if b then
+                b:ClearAllPoints()
+                b:Hide()
+            end
+        end
+        st.nb, st.nd, st.friend = 0, 0, nil
+        return
+    end
 
     local num_buff = 0
     local num_debuff = 0
 
-    if not unit or not UnitExists(unit) then
-        for i = 1, maxBuffs do
-            local b = _G[framePrefix .. "Buff" .. i]
-            if b then
-                b:ClearAllPoints()
-                b:Hide()
-            end
-        end
-        for i = 1, maxDebuffs do
-            local b = _G[framePrefix .. "Debuff" .. i]
-            if b then
-                b:ClearAllPoints()
-                b:Hide()
-            end
-        end
-        return
-    end
-
-
+    -- Icons / counts / borders, breaking on the first empty slot instead of
+    -- always sweeping the full 64 / 128 range
     for i = 1, maxBuffs do
         local buff = UnitBuff(unit, i)
-        local button = _G[framePrefix .. "Buff" .. i]
-        if button then
-            if buff then
-                local icon = _G[framePrefix .. "Buff" .. i .. "Icon"]
-                if icon then icon:SetTexture(buff) end
-                button:Show()
-                button.id = i
-                num_buff = i
-            else
-                button:Hide()
-            end
+        if not buff then break end
+        num_buff = i
+        local e = buffArr[i]
+        if e.icon and e.icon:GetTexture() ~= buff then
+            e.icon:SetTexture(buff)
         end
+        -- Client TargetBuffButtonTemplate OnEnter calls SetUnitBuff("target", this.id),
+        -- it reads the .id field (not GetID()), so it must be kept in sync here.
+        if e.button then e.button.id = i end
     end
 
     for i = 1, maxDebuffs do
         local debuff, debuffApplications, debuffType = UnitDebuff(unit, i)
-        local button = _G[framePrefix .. "Debuff" .. i]
-        if button then
-            if debuff then
-                local debuffCount = _G[framePrefix .. "Debuff" .. i .. "Count"]
-                if debuffCount then
-                    if debuffApplications and debuffApplications > 1 then
-                        debuffCount:SetText(debuffApplications)
-                        debuffCount:Show()
-                    else
-                        debuffCount:Hide()
-                    end
-                end
-                local border = _G[framePrefix .. "Debuff" .. i .. "Border"]
-                if border and DebuffTypeColor then
-                    local color = DebuffTypeColor[debuffType or "none"] or DebuffTypeColor["none"]
-                    border:SetVertexColor(color.r, color.g, color.b)
-                end
-                local icon = _G[framePrefix .. "Debuff" .. i .. "Icon"]
-                if icon then icon:SetTexture(debuff) end
-                button:Show()
-                button.id = i
-                num_debuff = i
+        if not debuff then break end
+        num_debuff = i
+        local e = debArr[i]
+        if e.icon and e.icon:GetTexture() ~= debuff then
+            e.icon:SetTexture(debuff)
+        end
+        if e.count then
+            if debuffApplications and debuffApplications > 1 then
+                e.count:SetText(debuffApplications)
+                e.count:Show()
             else
-                button:Hide()
+                e.count:Hide()
             end
         end
+        if e.border and DebuffTypeColor then
+            local color = DebuffTypeColor[debuffType or "none"] or DebuffTypeColor["none"]
+            e.border:SetVertexColor(color.r, color.g, color.b)
+        end
+        -- Client TargetDebuffButtonTemplate OnEnter reads this.id too
+        if e.button then e.button.id = i end
     end
 
-    if UnitIsFriend("player", unit) then
-        local lastBuffRowStart = OzUF.ArrangeButtonGroup(framePrefix .. "Buff", num_buff, framePrefix, true, 4, 4, 4, 12,
-            8)
+    -- Hide only the tail that shrank (full sweep on the very first call only)
+    local hideFromBuff = (st.nb < 0) and 1 or (num_buff + 1)
+    local hideToBuff = (st.nb < 0) and maxBuffs or st.nb
+    for i = hideFromBuff, hideToBuff do
+        local b = buffArr[i].button
+        if b then b:Hide() end
+    end
+
+    local hideFromDebuff = (st.nd < 0) and 1 or (num_debuff + 1)
+    local hideToDebuff = (st.nd < 0) and maxDebuffs or st.nd
+    for i = hideFromDebuff, hideToDebuff do
+        local b = debArr[i].button
+        if b then b:Hide() end
+    end
+
+    local isFriend = UnitIsFriend("player", unit) and true or false
+
+    -- Dirty check: re-anchoring is the expensive part, skip when nothing changed.
+    -- friend is tracked too, since flipping between enemy/friend reorders the rows.
+    if num_buff == st.nb and num_debuff == st.nd and isFriend == st.friend then return end
+    st.nb, st.nd, st.friend = num_buff, num_debuff, isFriend
+
+    if isFriend then
+        local lastBuffRowStart = OzUF.ArrangeButtonGroup(buffKey, num_buff, framePrefix, true, 8, 8, 8, 8, 8)
         if num_debuff > 0 then
-            OzUF.ArrangeButtonGroup(framePrefix .. "Debuff", num_debuff, lastBuffRowStart or framePrefix,
+            OzUF.ArrangeButtonGroup(debuffKey, num_debuff, lastBuffRowStart or framePrefix,
                 lastBuffRowStart == nil, 12, 12, 12, 12, 8)
         end
     else
-        local lastDebuffRowStart = OzUF.ArrangeButtonGroup(framePrefix .. "Debuff", num_debuff, framePrefix, true, 4, 4,
-            4, 12, 8)
+        local lastDebuffRowStart = OzUF.ArrangeButtonGroup(debuffKey, num_debuff, framePrefix, true, 4, 4, 4, 12, 8)
         if num_buff > 0 then
-            OzUF.ArrangeButtonGroup(framePrefix .. "Buff", num_buff, lastDebuffRowStart or framePrefix,
-                lastDebuffRowStart == nil, 12, 12, 12, 12, 8)
+            OzUF.ArrangeButtonGroup(buffKey, num_buff, lastDebuffRowStart or framePrefix,
+                lastDebuffRowStart == nil, 8, 8, 8, 8, 8)
         end
     end
 end
@@ -355,53 +430,71 @@ OzUF.libhealth = libhealth
 local HookTextStatusBar_UpdateTextString = TextStatusBar_UpdateTextString
 function TextStatusBar_UpdateTextString(sb)
     if not sb then sb = this end
+    if not sb then return end
 
     -- Only call Blizzard's original handler for default Blizzard status bars (e.g. PlayerFrame)
-    if sb ~= OzUFFocusFrameHealthBar and sb ~= OzUFFocusFrameManaBar and sb ~= TargetFrameHealthBar and sb ~= TargetFrameManaBar then
-        if HookTextStatusBar_UpdateTextString then
+    local custom_bar = (sb == OzUFFocusFrameHealthBar or sb == OzUFFocusFrameManaBar
+        or sb == TargetFrameHealthBar or sb == TargetFrameManaBar)
+
+    local text_string = sb.TextString
+    if (not text_string) or (not sb.unit) then
+        if (not custom_bar) and HookTextStatusBar_UpdateTextString then
             pcall(HookTextStatusBar_UpdateTextString, sb)
+        end
+        return
+    end
+
+    local min, max = sb:GetMinMaxValues()
+    local cur = sb:GetValue()
+    cur = cur or 0
+    max = max or 0
+
+    if sb == TargetFrameHealthBar then
+        if UnitIsPlayer(sb.unit) then
+            cur = UnitHealth(sb.unit) or 0
+            max = UnitHealthMax(sb.unit) or 0
+        else
+            cur, max = OzUF.libhealth:GetUnitHealth(sb.unit)
+            cur = cur or 0
+            max = max or 0
+        end
+    elseif sb == OzUFFocusFrameHealthBar then
+        if OzUF.Focus and OzUF.Focus.GetHealth then
+            cur, max = OzUF.Focus:GetHealth()
+            cur = cur or 0
+            max = max or 0
         end
     end
 
-    local text_string = sb.TextString
-    if text_string and sb.unit then
-        sb.lockShow = 42
-        sb:Show()
+    local text_hidden = false
+    if max == 0 then
+        text_hidden = true
+    elseif UnitExists(sb.unit) and (UnitIsDead(sb.unit) or UnitIsGhost(sb.unit)) then
+        text_hidden = true
+    end
 
-        local min, max = sb:GetMinMaxValues()
-        local cur = sb:GetValue()
-        cur = cur or 0
-        max = max or 0
+    -- SetValue -> TextStatusBar_OnValueChanged -> this function, for EVERY status
+    -- bar on screen. Skip all string work when nothing we render would change.
+    -- The check runs BEFORE Blizzard's handler on purpose: skipping only our own
+    -- part would leave Blizzard's "1234 / 5678" text visible instead of ours.
+    if sb.oz_unit == sb.unit and sb.oz_cur == cur and sb.oz_max == max and sb.oz_hidden == text_hidden then
+        return
+    end
+    sb.oz_unit, sb.oz_cur, sb.oz_max, sb.oz_hidden = sb.unit, cur, max, text_hidden
 
-        if sb == TargetFrameHealthBar then
-            if UnitIsPlayer(sb.unit) then
-                cur = UnitHealth(sb.unit) or 0
-                max = UnitHealthMax(sb.unit) or 0
-            else
-                cur, max = OzUF.libhealth:GetUnitHealth(sb.unit)
-                cur = cur or 0
-                max = max or 0
-            end
-        elseif sb == OzUFFocusFrameHealthBar then
-            if OzUF.Focus and OzUF.Focus.GetHealth then
-                cur, max = OzUF.Focus:GetHealth()
-                cur = cur or 0
-                max = max or 0
-            end
-        end
+    if (not custom_bar) and HookTextStatusBar_UpdateTextString then
+        pcall(HookTextStatusBar_UpdateTextString, sb)
+    end
 
-        local percent = max > 0 and math.floor(cur / max * 100) or 0
+    sb.lockShow = 42
+    sb:Show()
 
-        if max == 0 then
-            text_string:Hide()
-            text_string:SetText("")
-        elseif UnitExists(sb.unit) and (UnitIsDead(sb.unit) or UnitIsGhost(sb.unit)) then
-            text_string:Hide()
-            text_string:SetText("")
-        else
-            text_string:SetText(OzUF.Abbreviate(cur) .. "/" .. OzUF.Abbreviate(max))
-            text_string:Show()
-        end
+    if text_hidden then
+        text_string:Hide()
+        text_string:SetText("")
+    else
+        text_string:SetText(OzUF.Abbreviate(cur) .. "/" .. OzUF.Abbreviate(max))
+        text_string:Show()
     end
 end
 

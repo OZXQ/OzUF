@@ -229,8 +229,8 @@ end
 -------------------------------------------------------------------------------
 -- More Buffs & Debuffs (unitframes-morebuffs.lua clone)
 -------------------------------------------------------------------------------
-local TARGETFRAMEBUFF_MAX_TARGET_DEBUFFS = 128
-local TARGETFRAMEBUFF_MAX_TARGET_BUFFS = 64
+local TARGETFRAMEBUFF_MAX_TARGET_DEBUFFS = 32
+local TARGETFRAMEBUFF_MAX_TARGET_BUFFS = 32
 
 -- Create extra buttons
 for i = 6, TARGETFRAMEBUFF_MAX_TARGET_BUFFS do
@@ -240,11 +240,28 @@ for i = 6, TARGETFRAMEBUFF_MAX_TARGET_BUFFS do
     button:SetHeight(21)
 end
 
-for i = 6, TARGETFRAMEBUFF_MAX_TARGET_DEBUFFS do
+-- Client XML already defines TargetFrameDebuff1..16, so only 17..N are created
+-- here. Creating 6..16 again would replace those globals and orphan the
+-- XML-created frames (leaking them as always-present children of TargetFrame).
+for i = 17, TARGETFRAMEBUFF_MAX_TARGET_DEBUFFS do
     local button = CreateFrame("Button", "TargetFrameDebuff" .. i, TargetFrame, "TargetDebuffButtonTemplate")
     button:SetID(i)
     button:SetWidth(21)
     button:SetHeight(21)
+    local border = _G["TargetFrameDebuff" .. i .. "Border"]
+    if border then
+        border:SetWidth(21)
+        border:SetHeight(21)
+    end
+end
+
+-- Normalize the client-provided 1..16 to the same 21x21 size as 17..N
+for i = 1, 16 do
+    local button = _G["TargetFrameDebuff" .. i]
+    if button then
+        button:SetWidth(21)
+        button:SetHeight(21)
+    end
     local border = _G["TargetFrameDebuff" .. i .. "Border"]
     if border then
         border:SetWidth(21)
@@ -274,6 +291,7 @@ targetEventFrame:RegisterEvent("UNIT_AURA")
 
 targetEventFrame:SetScript("OnEvent", function()
     if event == "PLAYER_ENTERING_WORLD" then
+        OzUF.ResetAuraCache("TargetFrame")
         SetupTargetLayout()
         TargetFrame_CheckClassification()
         TargetFrame_CheckFaction(TargetFrame)

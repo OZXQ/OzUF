@@ -8,38 +8,79 @@
 local _G = getfenv(0)
 
 -------------------------------------------------------------------------------
--- Party Class Colors
+-- Static lookup tables (built once, no per-call string concatenation)
 -------------------------------------------------------------------------------
-local function UpdatePartyColors()
+local PARTY_UNITS = {}
+local party_refs = {}
+local DEFAULT_CLASS_COLOR = { r = 0.5, g = 0.5, b = 0.5 }
+
+local function build_party_refs()
     for id = 1, MAX_PARTY_MEMBERS do
-        local name = _G["PartyMemberFrame" .. id .. "Name"]
-        local unit = "party" .. id
-        if UnitExists(unit) and name then
-            local _, class = UnitClass(unit)
-            local color = RAID_CLASS_COLORS[class] or { r = 0.5, g = 0.5, b = 0.5 }
-            name:SetTextColor(color.r, color.g, color.b, 1)
+        PARTY_UNITS[id] = PARTY_UNITS[id] or ("party" .. id)
+        if not party_refs[id] then
+            party_refs[id] = {
+                name = _G["PartyMemberFrame" .. id .. "Name"],
+                portrait = _G["PartyMemberFrame" .. id .. "Portrait"],
+            }
         end
     end
 end
 
 -------------------------------------------------------------------------------
--- Party Class Portraits
+-- Single-pass refresh (class colors + class portraits)
 -------------------------------------------------------------------------------
-local function UpdatePartyPortraits()
+local function refresh_party_frames()
+    build_party_refs()
+
     for id = 1, MAX_PARTY_MEMBERS do
-        local portrait = _G["PartyMemberFrame" .. id .. "Portrait"]
-        local unit = "party" .. id
-        if UnitExists(unit) and portrait then
+        local ref = party_refs[id]
+        local unit = PARTY_UNITS[id]
+        if ref and unit and UnitExists(unit) then
             local _, class = UnitClass(unit)
-            if UnitIsPlayer(unit) and class and OzUF.CLASS_ICON[class] then
-                portrait:SetTexture(OzUF.CLASS_ICON[class])
-            else
-                portrait:SetTexCoord(0, 1, 0, 1)
-                SetPortraitTexture(portrait, unit)
+
+            if ref.name then
+                local color = RAID_CLASS_COLORS[class] or DEFAULT_CLASS_COLOR
+                ref.name:SetTextColor(color.r, color.g, color.b, 1)
+            end
+
+            local portrait = ref.portrait
+            if portrait then
+                if UnitIsPlayer(unit) and class and OzUF.CLASS_ICON[class] then
+                    portrait:SetTexture(OzUF.CLASS_ICON[class])
+                else
+                    portrait:SetTexCoord(0, 1, 0, 1)
+                    SetPortraitTexture(portrait, unit)
+                end
             end
         end
     end
 end
+
+-------------------------------------------------------------------------------
+-- Coalesced refresh driver
+-- PartyMemberFrame_UpdateMember is invoked once per party member, so doing the
+-- work inline was O(n^2). Mark dirty here and refresh once after the burst.
+-------------------------------------------------------------------------------
+local partyDirty = false
+local partyTimer = 0
+local partyDriver = CreateFrame("Frame")
+partyDriver:Hide()
+
+local function request_party_refresh()
+    partyDirty = true
+    partyTimer = 0
+    partyDriver:Show()
+end
+
+partyDriver:SetScript("OnUpdate", function()
+    partyTimer = partyTimer + arg1
+    if partyTimer < 0.2 then return end
+    partyTimer = 0
+    this:Hide()
+    if not partyDirty then return end
+    partyDirty = false
+    refresh_party_frames()
+end)
 
 -------------------------------------------------------------------------------
 -- Hooks & Event Registration
@@ -47,8 +88,7 @@ end
 local origPartyMemberFrame_UpdateMember = PartyMemberFrame_UpdateMember
 PartyMemberFrame_UpdateMember = function(self)
     origPartyMemberFrame_UpdateMember(self)
-    UpdatePartyColors()
-    UpdatePartyPortraits()
+    request_party_refresh()
 end
 
 local partyEvents = CreateFrame("Frame")
@@ -62,7 +102,5 @@ partyEvents:SetScript("OnEvent", function()
             return
         end
     end
-    UpdatePartyColors()
-    UpdatePartyPortraits()
+    request_party_refresh()
 end)
-

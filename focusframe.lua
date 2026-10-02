@@ -338,8 +338,8 @@ end)
 -------------------------------------------------------------------------------
 -- Focus Buffs and Debuffs (Matching TargetFrame layout)
 -------------------------------------------------------------------------------
-local FOCUS_MAX_BUFFS = 64
-local FOCUS_MAX_DEBUFFS = 128
+local FOCUS_MAX_BUFFS = 32
+local FOCUS_MAX_DEBUFFS = 32
 
 for i = 1, FOCUS_MAX_BUFFS do
     local b = CreateFrame("Button", "OzUFFocusFrameBuff" .. i, f)
@@ -389,7 +389,14 @@ for i = 1, FOCUS_MAX_DEBUFFS do
     b:Hide()
 end
 
+-- Last rendered counts, used to skip the expensive re-anchor sweep
+local focusAuraState = { nb = -1, nd = -1, friend = nil }
+
 local function RenderFocusAuras()
+    -- Focus unit not resolvable: Focus.cache holds stale data, and re-rendering
+    -- it several times a second is pure waste. Freeze the last state instead.
+    if not Focus.unit or not UnitExists(Focus.unit) then return end
+
     local cache = Focus.cache
     local buffs = cache.buffs or {}
     local debuffs = cache.debuffs or {}
@@ -397,82 +404,94 @@ local function RenderFocusAuras()
     local num_buff = table.getn(buffs)
     local num_debuff = table.getn(debuffs)
 
-    for i = 1, FOCUS_MAX_BUFFS do
-        local b = _G["OzUFFocusFrameBuff" .. i]
-        if b then
-            if i <= num_buff then
-                local icon = _G["OzUFFocusFrameBuff" .. i .. "Icon"]
-                if icon then icon:SetTexture(buffs[i]) end
-                b:Show()
-                b.id = i
-            else
-                b:Hide()
+    local buffKey = "OzUFFocusFrameBuff"
+    local debuffKey = "OzUFFocusFrameDebuff"
+    local buffArr = OzUF.GetAuraGroup(buffKey, FOCUS_MAX_BUFFS, false)
+    local debArr = OzUF.GetAuraGroup(debuffKey, FOCUS_MAX_DEBUFFS, true)
+
+    -- Icons / counts / borders for the slots actually in use
+    for i = 1, num_buff do
+        local e = buffArr[i]
+        if e then
+            if e.icon and e.icon:GetTexture() ~= buffs[i] then
+                e.icon:SetTexture(buffs[i])
             end
+            -- Client / focus tooltip scripts read this.id
+            if e.button then e.button.id = i end
         end
     end
 
-    for i = 1, FOCUS_MAX_DEBUFFS do
-        local b = _G["OzUFFocusFrameDebuff" .. i]
-        if b then
-            if i <= num_debuff then
-                local item = debuffs[i]
-                local icon = _G["OzUFFocusFrameDebuff" .. i .. "Icon"]
-                if icon then icon:SetTexture(item.texture) end
-
-                local debuffCount = _G["OzUFFocusFrameDebuff" .. i .. "Count"]
-                if debuffCount then
-                    if item.count and item.count > 1 then
-                        debuffCount:SetText(item.count)
-                        debuffCount:Show()
-                    else
-                        debuffCount:Hide()
-                    end
-                end
-
-                local border = _G["OzUFFocusFrameDebuff" .. i .. "Border"]
-                if border and DebuffTypeColor then
-                    local color = DebuffTypeColor[item.debuffType or "none"] or DebuffTypeColor["none"]
-                    border:SetVertexColor(color.r, color.g, color.b)
-                end
-
-                b:Show()
-                b.id = i
-            else
-                b:Hide()
+    for i = 1, num_debuff do
+        local item = debuffs[i]
+        local e = debArr[i]
+        if e then
+            if e.icon and e.icon:GetTexture() ~= item.texture then
+                e.icon:SetTexture(item.texture)
             end
+            if e.count then
+                if item.count and item.count > 1 then
+                    e.count:SetText(item.count)
+                    e.count:Show()
+                else
+                    e.count:Hide()
+                end
+            end
+            if e.border and DebuffTypeColor then
+                local color = DebuffTypeColor[item.debuffType or "none"] or DebuffTypeColor["none"]
+                e.border:SetVertexColor(color.r, color.g, color.b)
+            end
+            if e.button then e.button.id = i end
         end
     end
 
-    for i = 1, FOCUS_MAX_BUFFS do
-        local b = _G["OzUFFocusFrameBuff" .. i]
-        if b then b:ClearAllPoints() end
-    end
-    for i = 1, FOCUS_MAX_DEBUFFS do
-        local b = _G["OzUFFocusFrameDebuff" .. i]
-        if b then b:ClearAllPoints() end
+    -- Hide only the tail that shrank (full sweep on the very first call only)
+    local hideFromBuff = (focusAuraState.nb < 0) and 1 or (num_buff + 1)
+    local hideToBuff = (focusAuraState.nb < 0) and FOCUS_MAX_BUFFS or focusAuraState.nb
+    for i = hideFromBuff, hideToBuff do
+        local b = buffArr[i].button
+        if b then
+            b:ClearAllPoints()
+            b:Hide()
+        end
     end
 
+    local hideFromDebuff = (focusAuraState.nd < 0) and 1 or (num_debuff + 1)
+    local hideToDebuff = (focusAuraState.nd < 0) and FOCUS_MAX_DEBUFFS or focusAuraState.nd
+    for i = hideFromDebuff, hideToDebuff do
+        local b = debArr[i].button
+        if b then
+            b:ClearAllPoints()
+            b:Hide()
+        end
+    end
 
     local isFriend = false
-    if Focus.unit and UnitExists(Focus.unit) then
-        isFriend = UnitIsFriend("player", Focus.unit)
+    if UnitIsFriend("player", Focus.unit) then
+        isFriend = true
     elseif cache.canAttack == nil or cache.canAttack == false then
         isFriend = true
     end
 
+    -- Dirty check: re-anchoring is the expensive part, skip when nothing changed
+    if num_buff == focusAuraState.nb and num_debuff == focusAuraState.nd and isFriend == focusAuraState.friend then
+        return
+    end
+    focusAuraState.nb, focusAuraState.nd, focusAuraState.friend = num_buff, num_debuff, isFriend
+
+    -- ArrangeButtonGroup already performs ClearAllPoints + Show per button, so an
+    -- extra preparatory pass here would redo the exact same work a second time.
+
     if isFriend then
-        local lastBuffRowStart = OzUF.ArrangeButtonGroup("OzUFFocusFrameBuff", num_buff, "OzUFFocusFrame", true, 4, 4, 4,
-            12, 8)
+        local lastBuffRowStart = OzUF.ArrangeButtonGroup(buffKey, num_buff, "OzUFFocusFrame", true, 8, 8, 8, 8, 8)
         if num_debuff > 0 then
-            OzUF.ArrangeButtonGroup("OzUFFocusFrameDebuff", num_debuff, lastBuffRowStart or "OzUFFocusFrame",
+            OzUF.ArrangeButtonGroup(debuffKey, num_debuff, lastBuffRowStart or "OzUFFocusFrame",
                 lastBuffRowStart == nil, 12, 12, 12, 12, 8)
         end
     else
-        local lastDebuffRowStart = OzUF.ArrangeButtonGroup("OzUFFocusFrameDebuff", num_debuff, "OzUFFocusFrame", true, 4,
-            4, 4, 12, 8)
+        local lastDebuffRowStart = OzUF.ArrangeButtonGroup(debuffKey, num_debuff, "OzUFFocusFrame", true, 4, 4, 4, 12, 8)
         if num_buff > 0 then
-            OzUF.ArrangeButtonGroup("OzUFFocusFrameBuff", num_buff, lastDebuffRowStart or "OzUFFocusFrame",
-                lastDebuffRowStart == nil, 12, 12, 12, 12, 8)
+            OzUF.ArrangeButtonGroup(buffKey, num_buff, lastDebuffRowStart or "OzUFFocusFrame",
+                lastDebuffRowStart == nil, 8, 8, 8, 8, 8)
         end
     end
 end
@@ -544,6 +563,9 @@ function Focus:GetHealth()
     return 100, 100, true
 end
 
+local cache_unit = nil      -- unit token the identity fields were resolved for
+local cache_full_time = 0   -- GetTime() of the last full identity refresh
+
 local function UpdateFocusCache(unit)
     if not unit or not UnitExists(unit) then return end
 
@@ -555,37 +577,56 @@ local function UpdateFocusCache(unit)
         Focus.guid = UnitGUID(unit)
     end
 
-    cache.level = UnitLevel(unit)
-    cache.isCorpse = UnitIsCorpse(unit)
-    cache.canAttack = UnitCanAttack("player", unit)
-    cache.classification = UnitClassification(unit) or "normal"
+    -- Identity fields only change when the focus target itself changes. Resolving
+    -- them on every poll tick burned ~12 unit API calls per tick for nothing.
+    local now = GetTime()
+    local full_refresh = (unit ~= cache_unit) or (now - cache_full_time >= 2.0)
+    if full_refresh then
+        cache_unit = unit
+        cache_full_time = now
 
-    cache.isPlayer = UnitIsPlayer(unit)
-    cache.reactionColor = cache.reactionColor or { r = 1, g = 1, b = 1 }
-    if cache.isPlayer then
-        local _, class = UnitClass(unit)
-        cache.class = class
-        local c = RAID_CLASS_COLORS[class] or { r = 0.5, g = 0.5, b = 0.5 }
-        cache.reactionColor.r = c.r
-        cache.reactionColor.g = c.g
-        cache.reactionColor.b = c.b
-    else
-        cache.class = nil
-        local r, g, b = OzUF.GetUnitReactionColor(unit)
-        cache.reactionColor.r = r
-        cache.reactionColor.g = g
-        cache.reactionColor.b = b
+        cache.level = UnitLevel(unit)
+        cache.isCorpse = UnitIsCorpse(unit)
+        cache.canAttack = UnitCanAttack("player", unit)
+        cache.classification = UnitClassification(unit) or "normal"
+
+        cache.isPlayer = UnitIsPlayer(unit)
+        cache.reactionColor = cache.reactionColor or { r = 1, g = 1, b = 1 }
+        if cache.isPlayer then
+            local _, class = UnitClass(unit)
+            cache.class = class
+            local c = RAID_CLASS_COLORS[class] or { r = 0.5, g = 0.5, b = 0.5 }
+            cache.reactionColor.r = c.r
+            cache.reactionColor.g = c.g
+            cache.reactionColor.b = c.b
+        else
+            cache.class = nil
+            local r, g, b = OzUF.GetUnitReactionColor(unit)
+            cache.reactionColor.r = r
+            cache.reactionColor.g = g
+            cache.reactionColor.b = b
+        end
+
+        if cache.isPlayer and cache.class and OzUF.CLASS_ICON[cache.class] then
+            portrait:SetTexture(OzUF.CLASS_ICON[cache.class])
+            portrait:SetTexCoord(0, 1, 0, 1)
+        else
+            portrait:SetTexCoord(0, 1, 0, 1)
+            SetPortraitTexture(portrait, unit)
+        end
+
+        cache.leader = UnitIsPartyLeader(unit)
+        local factionGroup = UnitFactionGroup(unit)
+        if UnitIsPVPFreeForAll(unit) then
+            cache.pvp = "FFA"
+        elseif factionGroup and UnitIsPVP(unit) then
+            cache.pvp = factionGroup
+        else
+            cache.pvp = nil
+        end
     end
 
-
-    if cache.isPlayer and cache.class and OzUF.CLASS_ICON[cache.class] then
-        portrait:SetTexture(OzUF.CLASS_ICON[cache.class])
-        portrait:SetTexCoord(0, 1, 0, 1)
-    else
-        portrait:SetTexCoord(0, 1, 0, 1)
-        SetPortraitTexture(portrait, unit)
-    end
-
+    -- Volatile fields: refreshed on every tick
     local curHp, maxHp
     if cache.isPlayer then
         curHp = UnitHealth(unit) or 0
@@ -603,17 +644,7 @@ local function UpdateFocusCache(unit)
     cache.powerType = UnitPowerType(unit) or 0
 
     cache.isDead = (UnitIsDead(unit) or UnitIsGhost(unit)) and true or false
-
     cache.raidIcon = GetRaidTargetIndex(unit)
-    cache.leader = UnitIsPartyLeader(unit)
-    local factionGroup = UnitFactionGroup(unit)
-    if UnitIsPVPFreeForAll(unit) then
-        cache.pvp = "FFA"
-    elseif factionGroup and UnitIsPVP(unit) then
-        cache.pvp = factionGroup
-    else
-        cache.pvp = nil
-    end
 
     cache.buffs = cache.buffs or {}
     local numBuffs = 0
@@ -729,7 +760,8 @@ local function UpdateFocusFrame()
     local unit = ResolveFocusUnit()
     Focus.unit = unit
 
-    if unit and UnitExists(unit) then
+    -- ResolveFocusUnit already verifies UnitExists on every return path
+    if unit then
         UpdateFocusCache(unit)
         UpdateFocusTarget(unit)
     else
@@ -860,6 +892,8 @@ function OzUF.SetFocus(unit)
             Focus.guid = nil
         end
 
+        focusAuraState.nb, focusAuraState.nd, focusAuraState.friend = -1, -1, nil
+        cache_unit = nil
         UpdateFocusCache(unit)
 
         f:Show()
@@ -883,6 +917,8 @@ function OzUF.ClearFocus()
     Focus.guid = nil
     Focus.cache = {}
     Focus.pendingClear = nil
+    focusAuraState.nb, focusAuraState.nd, focusAuraState.friend = -1, -1, nil
+    cache_unit = nil
 
     if UIDROPDOWNMENU_OPEN_MENU == focusDropDown then
         CloseDropDownMenus()
@@ -950,6 +986,9 @@ f:RegisterEvent("CHAT_MSG_COMBAT_FRIENDLY_DEATH")
 
 f:SetScript("OnEvent", function()
     if event == "PLAYER_ENTERING_WORLD" then
+        OzUF.ResetAuraCache("OzUFFocusFrame")
+        focusAuraState.nb, focusAuraState.nd, focusAuraState.friend = -1, -1, nil
+        cache_unit = nil
         if OzUF_DB then
             if OzUF_DB["focus_pos"] then
                 local pos = OzUF_DB["focus_pos"]
@@ -989,14 +1028,13 @@ f:SetScript("OnUpdate", function()
         return
     end
 
-    focusTimer = focusTimer + arg1
-    if focusTimer >= 0.25 or (focusUpdateScheduled and (GetTime() - lastFocusUpdate >= 0.1)) then
-        focusTimer = 0
-        if Focus.name and f:IsShown() then
-            UpdateFocusFrame()
-            lastFocusUpdate = GetTime()
-            focusUpdateScheduled = false
-        end
-    end
+    if not Focus.name or not f:IsShown() then return end
 
+    focusTimer = focusTimer + arg1
+    if focusTimer >= 0.5 or (focusUpdateScheduled and (GetTime() - lastFocusUpdate >= 0.1)) then
+        focusTimer = 0
+        UpdateFocusFrame()
+        lastFocusUpdate = GetTime()
+        focusUpdateScheduled = false
+    end
 end)

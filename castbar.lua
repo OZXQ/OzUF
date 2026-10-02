@@ -565,6 +565,28 @@ local function SafeUnitIsDeadOrGhost(unit)
     return false
 end
 
+-- Reusable cast data table. GetUnitCastData runs at 20Hz for 3 bars, so returning
+-- a freshly built table each tick allocated ~60 tables/sec for nothing: callers
+-- read the fields immediately and never keep a reference to the table.
+local cast_data = {}
+local function fill_cast_data(spell, icon, cur, total, rem, channel)
+    cast_data.spell = spell
+    cast_data.icon = icon
+    cast_data.cur = cur
+    cast_data.total = total
+    cast_data.rem = rem
+    cast_data.channel = channel
+    return cast_data
+end
+
+-- Same as SafeUnitName but WITHOUT the existence check. Use it whenever the
+-- caller already verified UnitExists, to avoid a second pcall per tick.
+local function get_unit_name(unit)
+    if not unit or unit == "" then return nil end
+    local ok, name = pcall(UnitName, unit)
+    return ok and name or nil
+end
+
 local function GetUnitCastData(unit, fallbackName)
     -- 1. Fast path for player: prioritize SPELLCAST_* events, zero allocation & zero pcall
     if unit == "player" then
@@ -586,14 +608,7 @@ local function GetUnitCastData(unit, fallbackName)
                 if rem < 0 then rem = 0 end
                 if rem > total then rem = total end
 
-                return {
-                    spell = playerCast.spell,
-                    icon = playerCast.icon,
-                    cur = cur,
-                    total = total,
-                    rem = rem,
-                    channel = playerCast.channel,
-                }
+                return fill_cast_data(playerCast.spell, playerCast.icon, cur, total, rem, playerCast.channel)
             else
                 playerCast = nil
             end
@@ -622,14 +637,7 @@ local function GetUnitCastData(unit, fallbackName)
                 if rem < 0 then rem = 0 end
                 if rem > total then rem = total end
 
-                return {
-                    spell = s,
-                    icon = tex or playerSpellIcons[s] or "Interface\\Icons\\Temp",
-                    cur = cur,
-                    total = total,
-                    rem = rem,
-                    channel = isChannel,
-                }
+                return fill_cast_data(s, tex or playerSpellIcons[s] or "Interface\\Icons\\Temp", cur, total, rem, isChannel)
             end
         end
         return nil
@@ -679,19 +687,12 @@ local function GetUnitCastData(unit, fallbackName)
                 if rem < 0 then rem = 0 end
                 if rem > total then rem = total end
 
-                return {
-                    spell = spell,
-                    icon = texture or "Interface\\Icons\\Temp",
-                    cur = cur,
-                    total = total,
-                    rem = rem,
-                    channel = isChannel,
-                }
+                return fill_cast_data(spell, texture or "Interface\\Icons\\Temp", cur, total, rem, isChannel)
             end
         end
 
         if not fallbackName then
-            fallbackName = SafeUnitName(unit)
+            fallbackName = get_unit_name(unit)
         end
     end
 
@@ -710,14 +711,7 @@ local function GetUnitCastData(unit, fallbackName)
             if rem < 0 then rem = 0 end
             if rem > total then rem = total end
 
-            return {
-                spell = entry.spell,
-                icon = entry.icon,
-                cur = cur,
-                total = total,
-                rem = rem,
-                channel = entry.channel,
-            }
+            return fill_cast_data(entry.spell, entry.icon, cur, total, rem, entry.channel)
         else
             casts[fallbackName] = nil
         end
@@ -909,7 +903,7 @@ local targetCastbar = CreateCastbar(
     "target_castbar_pos",
     function()
         if SafeUnitExists("target") then
-            return "target", SafeUnitName("target")
+            return "target", get_unit_name("target")
         end
         return nil, nil
     end,
@@ -924,10 +918,10 @@ local focusCastbar = CreateCastbar(
     function()
         local fUnit = OzUF.Focus and OzUF.Focus.unit
         if fUnit and SafeUnitExists(fUnit) then
-            return fUnit, (OzUF.Focus and OzUF.Focus.name) or SafeUnitName(fUnit)
+            return fUnit, (OzUF.Focus and OzUF.Focus.name) or get_unit_name(fUnit)
         end
         if SafeUnitExists("focus") then
-            return "focus", (OzUF.Focus and OzUF.Focus.name) or SafeUnitName("focus")
+            return "focus", (OzUF.Focus and OzUF.Focus.name) or get_unit_name("focus")
         end
         if OzUF.Focus and OzUF.Focus.name then
             return nil, OzUF.Focus.name

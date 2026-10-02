@@ -57,7 +57,7 @@ local function SetupPlayerLayout()
     PlayerFrameHealthBar:SetPoint("TOPLEFT", 108, -24)
     PlayerFrameHealthBar:SetWidth(118)
     PlayerFrameHealthBar:SetHeight(28)
-    PlayerFrameManaBar:SetPoint("TOPLEFT", 108, -56)
+    PlayerFrameManaBar:SetPoint("TOPLEFT", 108, -55)
     PlayerFrameManaBar:SetWidth(118)
     PlayerFrameManaBar:SetHeight(11)
     PlayerFrameBackground:SetPoint("TOPLEFT", 108, -24)
@@ -208,6 +208,7 @@ local function SetupEnergyTick()
     local pheight = PlayerFrameManaBar:GetHeight()
     local pwidth = PlayerFrameManaBar:GetWidth()
 
+    local tick_timer = 0
     energytick:SetScript("OnUpdate", function()
         if this.target then
             this.start, this.max = GetTime(), this.target
@@ -215,6 +216,11 @@ local function SetupEnergyTick()
         end
 
         if not this.start then return end
+
+        -- Throttle the tick spark to 20Hz instead of running every rendered frame
+        tick_timer = tick_timer + arg1
+        if tick_timer < 0.05 then return end
+        tick_timer = 0
 
         this.current = GetTime() - this.start
 
@@ -284,4 +290,3 @@ playerLoginDelay:SetScript("OnUpdate", function()
         UpdatePlayerPortrait()
     end
 end)
-
